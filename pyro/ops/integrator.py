@@ -70,6 +70,7 @@ def leapfrog_discontiouous(
 def _single_step_leapfrog_discontiuous(z, r, potential_fn, kinetic_grad, step_size, z_grad=None):
     r"""
     Single step leapfrog algorithm that modifies the  `z` and `r` dicts in place by Laplace momentum
+    for discontinuous HMC
     """
     # update the variable 
     z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
@@ -103,7 +104,7 @@ def _single_step_leapfrog_discontiuous(z, r, potential_fn, kinetic_grad, step_si
 
 def _coord_integrator(z, r, potential_fn, kinetic_grad, step_size, z_grads=None):
     r"""
-    Coordinatewise integrator for dynamics with Laplace momentum
+    Coordinatewise integrator for dynamics with Laplace momentum for discontinuous HMC
     """
     return z, r
 
@@ -119,6 +120,7 @@ def velocity_verlet_with_extension(
 def _single_step_verlet_with_extension(z, r, potential_fn, kinetic_grad, step_size, z_grads=None):
     r"""
     Single step velocity verlet taht modifies the `z`, `r` dicts in place with dimension extension
+    TODO: add extension function with checking whether the `z` is at the domain of the question
     """
  
     z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
@@ -128,7 +130,7 @@ def _single_step_verlet_with_extension(z, r, potential_fn, kinetic_grad, step_si
         r[site_name] = r[site_name] + 0.5 * step_size * (
             -z_grads[site_name]
         )  # r(n+1/2)
-
+    
     r_grads = kinetic_grad(r)
     for site_name in z:
         z[site_name] = z[site_name] + step_size * r_grads[site_name]  # z(n+1)
@@ -141,7 +143,7 @@ def _single_step_verlet_with_extension(z, r, potential_fn, kinetic_grad, step_si
 
 def _extention(z):
     """
-    extend the dimensionality of `z` and `r`, used in np-hmc
+    TODO: extend the dimensionality of `z` and `r`, used in np-hmc
     """
     pass
 
