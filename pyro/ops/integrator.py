@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from torch.autograd import grad
-
+import pyro.poutine as poutine
 
 def velocity_verlet(
     z, r, potential_fn, kinetic_grad, step_size, num_steps=1, z_grads=None
@@ -59,41 +59,54 @@ def _single_step_verlet(z, r, potential_fn, kinetic_grad, step_size, z_grads=Non
     return z, r, z_grads, potential_energy
 
 def leapfrog_discontiouous(
-    z, r, potential_fn, kinetic_grad, num_steps=1, z_grads=None
+    z, r, model, potential_fn, kinetic_grad, step_size, num_steps=1, z_grads=None
 ):
     r"""
     Leapfrog algorithm for discontinuous HMC
     """
+    z_next = z.copy()
+    r_next = r.copy()
+    for _ in range(num_steps):
+        z_next, r_next, z_grads, potential_energy = _single_step_leapfrog_discontiuous(
+            z_next, r_next, model, potential_fn, kinetic_grad, step_size, z_grads
+        )
+    return z_next, r_next, z_grads, potential_energy
+
+
     pass
 
 
-def _single_step_leapfrog_discontiuous(z, r, potential_fn, kinetic_grad, step_size, z_grad=None):
+def _single_step_leapfrog_discontiuous(z, r, model, potential_fn, kinetic_grad, step_size, z_grad=None):
     r"""
     Single step leapfrog algorithm that modifies the  `z` and `r` dicts in place by Laplace momentum
     for discontinuous HMC
     """
-    # update the variable 
+    # update the momentum 
     z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
     for site_name in r:
         r[site_name] = r[site_name] + 0.5 * step_size * (
             -z_grads[site_name]
         )  # r(n+1/2)
 
-    # update the momentum
+    # update the variable
     r_grads = kinetic_grad(r)
     for site_name in z:
-        z[site_name] = z[site_name] + step_size * r_grads[site_name]  # z(n+1)
+        z[site_name] = z[site_name] + 0.5 * step_size * r[site_name]  # z(n+1)
 
-    # conduct coordinate integration
+    z = poutine.trace(poutine.replay(model, trace=z)).get_trace()
+
+    # conduct coordinate integration TODO: discontinuous flag
     z, r = _coord_integrator(z, r, potential_fn, kinetic_grad, step_size, z_grads)
 
     # update the variable
     z_grads, potential_energy = potential_grad(potential_fn, z)
-    for site_name in r:
-        r[site_name] = r[site_name] + 0.5 * step_size * (-z_grads[site_name])  # r(n+1)
+    for site_name in z:
+        z[site_name] = z[site_name] + 0.5 * step_size * r[site_name]  # r(n+1)
     
+    z = poutine.trace(poutine.replay(model, trace=z)).get_trace()
+
     # update momentum
-    z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
+    z_grads, potential_energy = potential_grad(potential_fn, z)
     for site_name in r:
         r[site_name] = r[site_name] + 0.5 * step_size * (
             -z_grads[site_name]
