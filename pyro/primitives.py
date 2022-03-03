@@ -125,7 +125,7 @@ def sample(name, fn, *args, **kwargs):
     # Transform obs_mask into multiple sample statements.
     obs = kwargs.pop("obs", None)
     obs_mask = kwargs.pop("obs_mask", None)
-    continuation = kwargs.pop("is_cont", None)
+    is_cont = kwargs.pop("is_cont", None)
     if obs_mask is not None:
         return _masked_observe(name, fn, obs, obs_mask, *args, **kwargs)
 
@@ -158,7 +158,8 @@ def sample(name, fn, *args, **kwargs):
             "cond_indep_stack": (),
             "done": False,
             "stop": False,
-            "continuation": continuation,
+            "continuation": None,
+            "is_cont": is_cont,
         }
         # apply the stack and return its return value
         apply_stack(msg)
