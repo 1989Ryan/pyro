@@ -366,6 +366,23 @@ def _find_valid_initial_params(
         "Model specification seems incorrect - cannot find valid initial params."
     )
 
+def run_prog(
+    model,
+    z,
+    *args,
+    **kwargs,
+):
+    """
+    run probabilistic program to get new `z`
+    given the current z: the value of the each step
+    need to construct the trace from the value z
+    """
+    conditioned_model = poutine.condition(model, data=z)
+    trace = poutine.trace(conditioned_model).get_trace(*args, **kwargs)
+    new_trace = poutine.trace(poutine.replay(model, trace=trace))       
+    new_z = {site_name: new_trace[site_name]["value"] for site_name in new_trace \
+        if site_name not in ["_INPUT", "_RETURN", "obs"]}
+    return new_z
 
 def initialize_model(
     model,

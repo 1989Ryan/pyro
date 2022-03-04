@@ -1,8 +1,34 @@
 # Copyright (c) 2017-2019 Uber Technologies, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+from cProfile import run
 from torch.autograd import grad
 import pyro.poutine as poutine
+import torch
+
+def run_prog(
+    model,
+    z,
+    *args,
+    **kwargs,
+):
+    """
+    run probabilistic program to get new `z`
+    given the current z: the value of the each step
+    need to construct the trace from the value z
+    """
+    conditioned_model = poutine.condition(model, data=z)
+    trace = poutine.trace(conditioned_model).get_trace(*args, **kwargs)
+    new_trace = poutine.trace(poutine.replay(model, trace=trace))       
+    new_z = {site_name: new_trace[site_name]["value"] for site_name in new_trace \
+        if site_name not in ["_INPUT", "_RETURN", "obs"]}
+    is_cont = {site_name: trace[site_name]["is_cont"] for site_name in trace \
+            if site_name not in ["_INPUT", "_RETURN", "obs"]}
+    is_cont_vector = torch.tensor([trace[site_name]["is_cont"] for site_name in trace\
+            if site_name not in ["_INPUT", "_RETURN", "obs"]])
+    return new_z, is_cont, is_cont_vector
+
+
 
 def velocity_verlet(
     z, r, potential_fn, kinetic_grad, step_size, num_steps=1, z_grads=None
@@ -93,9 +119,9 @@ def _single_step_leapfrog_discontiuous(z, r, model, potential_fn, kinetic_grad, 
     for site_name in z:
         z[site_name] = z[site_name] + 0.5 * step_size * r[site_name]  # z(n+1)
 
-    z = poutine.trace(poutine.replay(model, trace=z)).get_trace()
-
+    z, is_cont, is_cont_vector = run_prog(model, z)
     # conduct coordinate integration TODO: discontinuous flag
+    # TODO: permutation 
     z, r = _coord_integrator(z, r, potential_fn, kinetic_grad, step_size, z_grads)
 
     # update the variable
@@ -103,7 +129,7 @@ def _single_step_leapfrog_discontiuous(z, r, model, potential_fn, kinetic_grad, 
     for site_name in z:
         z[site_name] = z[site_name] + 0.5 * step_size * r[site_name]  # r(n+1)
     
-    z = poutine.trace(poutine.replay(model, trace=z)).get_trace()
+    z, is_cont, is_cont_vector = run_prog(model, z)
 
     # update momentum
     z_grads, potential_energy = potential_grad(potential_fn, z)

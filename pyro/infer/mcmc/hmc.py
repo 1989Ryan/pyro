@@ -162,7 +162,7 @@ class HMC(MCMCKernel):
 
     def _find_reasonable_step_size(self, z):
         step_size = self.step_size
-
+        
         # We are going to find a step_size which make accept_prob (Metropolis correction)
         # near the target_accept_prob. If accept_prob:=exp(-delta_energy) is small,
         # then we have to decrease step_size; otherwise, increase step_size.
@@ -223,7 +223,6 @@ class HMC(MCMCKernel):
                     torch.zeros(size, **options), torch.ones(size, **options)
                 ),
             )
-
         r = self.mass_matrix_adapter.scale(r_unscaled, r_prototype=self.initial_params)
         return r, r_unscaled
 

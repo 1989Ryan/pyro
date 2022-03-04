@@ -5,6 +5,7 @@ import math
 from collections import OrderedDict
 
 import torch
+from torch.distributions.laplace import Laplace
 
 import pyro
 import pyro.distributions as dist
@@ -14,7 +15,7 @@ from pyro.infer.autoguide import init_to_uniform
 from pyro.infer.mcmc.adaptation import WarmupAdapter
 from pyro.infer.mcmc.mcmc_kernel import MCMCKernel
 from pyro.infer.mcmc.util import initialize_model
-from pyro.ops.integrator import potential_grad, velocity_verlet
+from pyro.ops.integrator import potential_grad, leapfrog_discontiouous
 from pyro.util import optional, torch_isnan
 
 
@@ -160,6 +161,18 @@ class DHMC(MCMCKernel):
         self._z_grads_last = None
         self._warmup_steps = None
 
+    def _get_is_cont(self, z):
+        conditioned_model = pyro.poutine.condition(self.model, data=z)
+        trace = pyro.poutine.trace(conditioned_model).get_trace()
+        is_cont = {site_name: trace[site_name]["is_cont"] for site_name in trace \
+            if site_name not in ["_INPUT", "_RETURN", "obs"]}
+        is_cont_vector = torch.tensor([trace[site_name]["is_cont"] for site_name in trace\
+            if site_name not in ["_INPUT", "_RETURN", "obs"]])
+        return is_cont, is_cont_vector
+
+    def _get_current_site_name_and_size(self, z):
+        return tuple(z.keys()), len(z.keys()) 
+
     def _find_reasonable_step_size(self, z):
         step_size = self.step_size
 
@@ -167,12 +180,12 @@ class DHMC(MCMCKernel):
         # near the target_accept_prob. If accept_prob:=exp(-delta_energy) is small,
         # then we have to decrease step_size; otherwise, increase step_size.
         potential_energy = self.potential_fn(z)
-        r, r_unscaled = self._sample_r(name="r_presample_0")
+        r, r_unscaled = self._sample_r(name="r_presample_0", z=z)
         energy_current = self._kinetic_energy(r_unscaled) + potential_energy
         # This is required so as to avoid issues with autograd when model
         # contains transforms with cache_size > 0 (https://github.com/pyro-ppl/pyro/issues/2292)
         z = {k: v.clone() for k, v in z.items()}
-        z_new, r_new, z_grads_new, potential_energy_new = velocity_verlet(
+        z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
             z, r, self.potential_fn, self.mass_matrix_adapter.kinetic_grad, step_size
         )
         r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
@@ -195,7 +208,7 @@ class DHMC(MCMCKernel):
             step_size = step_size_scale * step_size
             r, r_unscaled = self._sample_r(name="r_presample_{}".format(t))
             energy_current = self._kinetic_energy(r_unscaled) + potential_energy
-            z_new, r_new, z_grads_new, potential_energy_new = velocity_verlet(
+            z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
                 z,
                 r,
                 self.potential_fn,
@@ -208,21 +221,26 @@ class DHMC(MCMCKernel):
             direction_new = 1 if self._direction_threshold < -delta_energy else -1
         return step_size
 
-    def _sample_r(self, name):
+    def _sample_r(self, name, z):
         r_unscaled = {}
         options = {
             "dtype": self._potential_energy_last.dtype,
             "device": self._potential_energy_last.device,
         }
-        for site_names, size in self.mass_matrix_adapter.mass_matrix_size.items():
-            # we want to sample from Normal distribution using `sample` method rather than
-            # `rsample` method because the former is a bit faster
-            r_unscaled[site_names] = pyro.sample(
-                "{}_{}".format(name, site_names),
-                NonreparameterizedNormal(
-                    torch.zeros(size, **options), torch.ones(size, **options)
-                ),
-            )
+        site_names, size = self._get_current_site_name_and_size(z)
+        _, is_cont = self._get_is_cont(z)
+        r_unscaled[site_names] = pyro.sample(
+            "{}_{}".format(name, site_names),
+            NonreparameterizedNormal(
+                torch.zeros(size, **options), torch.ones(size, **options)
+            ),
+        ) * is_cont + pyro.sample(
+            "{}_{}".format(name, site_names),
+            Laplace(
+                torch.zeros(size, **options), torch.ones(size, **options)
+            ),
+
+        ) * ~is_cont
 
         r = self.mass_matrix_adapter.scale(r_unscaled, r_prototype=self.initial_params)
         return r, r_unscaled
@@ -368,9 +386,10 @@ class DHMC(MCMCKernel):
         # Temporarily disable distributions args checking as
         # NaNs are expected during step size adaptation
         with optional(pyro.validation_enabled(False), self._t < self._warmup_steps):
-            z_new, r_new, z_grads_new, potential_energy_new = velocity_verlet(
+            z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
                 z,
-                r,
+                r_unscaled,
+                self.model,
                 self.potential_fn,
                 self.mass_matrix_adapter.kinetic_grad,
                 self.step_size,
