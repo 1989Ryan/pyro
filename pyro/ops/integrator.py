@@ -187,45 +187,6 @@ def _coord_integrator(z, r, z_0, r_0, idx, model, transforms, potential_fn, kine
         assert len(r_0) == len(r)
     return new_z, r, new_is_cont, new_is_cont_vec, r_0
 
-def velocity_verlet_with_extension(
-    z, r, potential_fn, kinetic_grad, num_steps=1, z_grads=None
-):
-    r"""
-    Second order symplectic integrator that uses the velocity verlet algorithm with dimenstion
-    extension
-    """
-    pass
-
-def _single_step_verlet_with_extension(z, r, potential_fn, kinetic_grad, step_size, z_grads=None):
-    r"""
-    Single step velocity verlet taht modifies the `z`, `r` dicts in place with dimension extension
-    TODO: add extension function with checking whether the `z` is at the domain of the question
-    """
- 
-    z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
-    # print(r)
-    # print(z)
-    for site_name in r:
-        r[site_name] = r[site_name] + 0.5 * step_size * (
-            -z_grads[site_name]
-        )  # r(n+1/2)
-    
-    r_grads = kinetic_grad(r)
-    for site_name in z:
-        z[site_name] = z[site_name] + step_size * r_grads[site_name]  # z(n+1)
-
-    z_grads, potential_energy = potential_grad(potential_fn, z)
-    for site_name in r:
-        r[site_name] = r[site_name] + 0.5 * step_size * (-z_grads[site_name])  # r(n+1)
-
-    return z, r, z_grads, potential_energy
-
-def _extention(z):
-    """
-    TODO: extend the dimensionality of `z` and `r`, used in np-hmc
-    """
-    pass
-
 def potential_grad(potential_fn, z):
     """
     Gradient of `potential_fn` w.r.t. parameters z.

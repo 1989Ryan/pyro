@@ -19,9 +19,9 @@ from pyro.ops.integrator import potential_grad, leapfrog_discontiouous
 from pyro.util import optional, torch_isnan
 
 
-class DHMC(MCMCKernel):
+class NPDHMC(MCMCKernel):
     r"""
-    Discontinuous Hamiltonian Monte Carlo kernel, where ``step_size`` and ``num_steps``
+    Nonparametric Discontinuous Hamiltonian Monte Carlo kernel, where ``step_size`` and ``num_steps``
     need to be explicitly specified by the user.
 
     **References**

@@ -5,13 +5,13 @@ from pyro.infer.mcmc.adaptation import ArrowheadMassMatrix, BlockMassMatrix
 from pyro.infer.mcmc.api import MCMC, StreamingMCMC
 from pyro.infer.mcmc.hmc import HMC
 from pyro.infer.mcmc.nuts import NUTS
-from pyro.infer.mcmc.dhmc import DHMC
+from pyro.infer.mcmc.np_dhmc import NPDHMC
 
 __all__ = [
     "ArrowheadMassMatrix",
     "BlockMassMatrix",
     "HMC",
-    "DHMC",
+    "NPDHMC",
     "MCMC",
     "NUTS",
     "StreamingMCMC",
