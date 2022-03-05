@@ -146,7 +146,7 @@ class DHMC(MCMCKernel):
     def _kinetic_energy(self, r_unscaled):
         energy = 0.0
         for site_names, value in r_unscaled.items():
-            energy = energy + value.dot(value)
+            energy = energy + value*value
         return 0.5 * energy
 
     def _reset(self):
@@ -181,13 +181,13 @@ class DHMC(MCMCKernel):
         # near the target_accept_prob. If accept_prob:=exp(-delta_energy) is small,
         # then we have to decrease step_size; otherwise, increase step_size.
         potential_energy = self.potential_fn(z)
-        r_unscaled = self._sample_r(name="r_presample_0", z=z)
+        r_unscaled, is_cont, _ = self._sample_r(name="r_presample_0", z=z)
         energy_current = self._kinetic_energy(r_unscaled) + potential_energy
         # This is required so as to avoid issues with autograd when model
         # contains transforms with cache_size > 0 (https://github.com/pyro-ppl/pyro/issues/2292)
         z = {k: v.clone() for k, v in z.items()}
         z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
-            z, r_unscaled, self.model, self.transforms, self.potential_fn, self.mass_matrix_adapter.kinetic_grad, step_size
+            z, r_unscaled, is_cont, self.model, self.transforms, self.potential_fn, self.mass_matrix_adapter.kinetic_grad, step_size
         )
         # r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
         r_new_unscaled = r_new
@@ -208,11 +208,12 @@ class DHMC(MCMCKernel):
         while direction_new == direction:
             t += 1
             step_size = step_size_scale * step_size
-            r_unscaled = self._sample_r(name="r_presample_{}".format(t))
+            r_unscaled, is_cont, _ = self._sample_r(name="r_presample_{}".format(t))
             energy_current = self._kinetic_energy(r_unscaled) + potential_energy
             z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
                 z,
                 r_unscaled,
+                is_cont, 
                 self.model,
                 self.transforms,
                 self.potential_fn,
@@ -232,7 +233,7 @@ class DHMC(MCMCKernel):
             "device": self._potential_energy_last.device,
         }
         site_names, size = self._get_current_site_name_and_size(z)
-        _, is_cont = self._get_is_cont(z)
+        is_cont_dict, is_cont = self._get_is_cont(z)
         r_unscaled[site_names] = pyro.sample(
             "{}_{}".format(name, site_names),
             NonreparameterizedNormal(
@@ -247,9 +248,9 @@ class DHMC(MCMCKernel):
         ) * ~is_cont
 
         # r = self.mass_matrix_adapter.scale(r_unscaled, r_prototype=self.initial_params)
-        r_unscaled_site_names, values = r_unscaled.items()
-        r_unscaled = dict(zip(r_unscaled_site_names, tuple(values)))
-        return r_unscaled
+        for r_unscaled_site_names, values in r_unscaled.items():
+            r_unscaled = dict(zip(r_unscaled_site_names, tuple(values)))
+        return r_unscaled, is_cont_dict, is_cont
 
     @property
     def mass_matrix_adapter(self):
@@ -386,7 +387,7 @@ class DHMC(MCMCKernel):
             if self._t > self._warmup_steps:
                 self._accept_cnt += 1
             return params
-        r_unscaled = self._sample_r(name="r_t={}".format(self._t), z=z)
+        r_unscaled, is_cont, _ = self._sample_r(name="r_t={}".format(self._t), z=z)
 
         # Temporarily disable distributions args checking as
         # NaNs are expected during step size adaptation
@@ -394,6 +395,7 @@ class DHMC(MCMCKernel):
             z_new, r_new, z_grads_new, potential_energy_new, r_unscaled = leapfrog_discontiouous(
                 z,
                 r_unscaled,
+                is_cont,
                 self.model,
                 self.transforms,
                 self.potential_fn,

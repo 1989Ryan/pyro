@@ -22,13 +22,13 @@ def run_prog(
     """
     conditioned_model = poutine.condition(model, data=z)
     trace = poutine.trace(conditioned_model).get_trace(*args, **kwargs)
-    new_trace = poutine.trace(poutine.replay(model, trace=trace))
-    new_trace = dict(new_trace.nodes)       
+    # new_trace = poutine.trace(poutine.replay(model, trace=trace)).get_trace()
+    new_trace = dict(trace.nodes)       
     new_z = {site_name: new_trace[site_name]["value"] for site_name in new_trace \
         if site_name not in ["_INPUT", "_RETURN", "obs"]}
-    is_cont = {site_name: trace[site_name]["is_cont"] for site_name in trace \
+    is_cont = {site_name: new_trace[site_name]["is_cont"] for site_name in new_trace \
             if site_name not in ["_INPUT", "_RETURN", "obs"]}
-    is_cont_vector = torch.tensor([trace[site_name]["is_cont"] for site_name in trace\
+    is_cont_vector = torch.tensor([new_trace[site_name]["is_cont"] for site_name in new_trace\
             if site_name not in ["_INPUT", "_RETURN", "obs"]])
     return new_z, is_cont, is_cont_vector
 
@@ -89,7 +89,7 @@ def _single_step_verlet(z, r, potential_fn, kinetic_grad, step_size, z_grads=Non
     return z, r, z_grads, potential_energy
 
 def leapfrog_discontiouous(
-    z, r, model, transforms, potential_fn, kinetic_grad, step_size, num_steps=1, z_grads=None
+    z, r, is_cont, model, transforms, potential_fn, kinetic_grad, step_size, num_steps=1, z_grads=None
 ):
     r"""
     Leapfrog algorithm for discontinuous HMC
@@ -100,30 +100,27 @@ def leapfrog_discontiouous(
     r_0 = r.copy()
     for _ in range(num_steps):
         z_next, r_next, z_grads, potential_energy, r_0 = _single_step_leapfrog_discontiuous(
-            z_next, r_next, z_0, r_0, transforms, model, potential_fn, kinetic_grad, step_size, z_grads
+            z_next, r_next, z_0, r_0, is_cont, transforms, model, potential_fn, kinetic_grad, step_size, z_grads
         )
     return z_next, r_next, z_grads, potential_energy, r_0
 
 
-    pass
-
-
-def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, transforms, model, potential_fn, kinetic_grad, step_size, z_grads=None):
+def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, model, potential_fn, kinetic_grad, step_size, z_grads=None):
     r"""
     Single step leapfrog algorithm that modifies the  `z` and `r` dicts in place by Laplace momentum
     for discontinuous HMC
     """
     # update the momentum 
     z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
-    for site_name in r:
+    for site_name in z_grads:
         r[site_name] = r[site_name] + 0.5 * step_size * (
             -z_grads[site_name]
-        )  # r(n+1/2)
+        ) * is_cont[site_name]  # r(n+1/2)
 
     # update the variable
     r_grads = kinetic_grad(r)
     for site_name in z:
-        z[site_name] = z[site_name] + 0.5 * step_size * r[site_name]  # z(n+1)
+        z[site_name] = z[site_name] + 0.5 * step_size * r[site_name] * is_cont[site_name]  # z(n+1)
 
     z, is_cont, is_cont_vector = run_prog(model, z, transforms)
     # conduct coordinate integration TODO: discontinuous flag
@@ -139,16 +136,16 @@ def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, transforms, model, potent
     # update the variable
     z_grads, potential_energy = potential_grad(potential_fn, z)
     for site_name in z:
-        z[site_name] = z[site_name] + 0.5 * step_size * r[site_name]  # r(n+1)
+        z[site_name] = z[site_name] + 0.5 * step_size * r[site_name] * is_cont[site_name]  # r(n+1)
     
     z, is_cont, is_cont_vector = run_prog(model, z, transforms)
 
     # update momentum
     z_grads, potential_energy = potential_grad(potential_fn, z)
-    for site_name in r:
+    for site_name in z_grads:
         r[site_name] = r[site_name] + 0.5 * step_size * (
             -z_grads[site_name]
-        )  # r(n+1/2)
+        ) * is_cont[site_name]  # r(n+1/2)
 
     return z, r, z_grads, potential_energy, r_0
 
@@ -180,14 +177,14 @@ def _coord_integrator(z, r, z_0, r_0, idx, model, transforms, potential_fn, kine
                 site_name = site_name_list[i]
                 r[site_name] = r_padding[i-N]
                 r_0[site_name] = r_padding[i-N]
-                print(r)
         else:
             # truncate everything to the lower dimension
             for i in range(N2, N):
                 site_name = site_name_list[i]
                 r.pop(site_name)
                 r_0.pop(site_name)
-                print(r)
+        assert len(new_z) == len(r)
+        assert len(r_0) == len(r)
     return new_z, r, new_is_cont, new_is_cont_vec, r_0
 
 def velocity_verlet_with_extension(
@@ -259,4 +256,5 @@ def potential_grad(potential_fn, z):
     grad_ret = dict(zip(z_keys, grads))
     if grad_ret["start"] is None:
         grad_ret["start"] = torch.tensor(0.0)
+    assert len(grad_ret) == len(z)
     return grad_ret, potential_energy.detach()
