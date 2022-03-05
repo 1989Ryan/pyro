@@ -1,6 +1,8 @@
 # Copyright (c) 2017-2019 Uber Technologies, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+import math
+from copy import deepcopy
 from cProfile import run
 from torch.autograd import grad
 import pyro.poutine as poutine
@@ -9,6 +11,7 @@ import torch
 def run_prog(
     model,
     z,
+    transforms,
     *args,
     **kwargs,
 ):
@@ -19,7 +22,8 @@ def run_prog(
     """
     conditioned_model = poutine.condition(model, data=z)
     trace = poutine.trace(conditioned_model).get_trace(*args, **kwargs)
-    new_trace = poutine.trace(poutine.replay(model, trace=trace))       
+    new_trace = poutine.trace(poutine.replay(model, trace=trace))
+    new_trace = dict(new_trace.nodes)       
     new_z = {site_name: new_trace[site_name]["value"] for site_name in new_trace \
         if site_name not in ["_INPUT", "_RETURN", "obs"]}
     is_cont = {site_name: trace[site_name]["is_cont"] for site_name in trace \
@@ -85,24 +89,26 @@ def _single_step_verlet(z, r, potential_fn, kinetic_grad, step_size, z_grads=Non
     return z, r, z_grads, potential_energy
 
 def leapfrog_discontiouous(
-    z, r, model, potential_fn, kinetic_grad, step_size, num_steps=1, z_grads=None
+    z, r, model, transforms, potential_fn, kinetic_grad, step_size, num_steps=1, z_grads=None
 ):
     r"""
     Leapfrog algorithm for discontinuous HMC
     """
     z_next = z.copy()
     r_next = r.copy()
+    z_0 = z.copy()
+    r_0 = r.copy()
     for _ in range(num_steps):
-        z_next, r_next, z_grads, potential_energy = _single_step_leapfrog_discontiuous(
-            z_next, r_next, model, potential_fn, kinetic_grad, step_size, z_grads
+        z_next, r_next, z_grads, potential_energy, r_0 = _single_step_leapfrog_discontiuous(
+            z_next, r_next, z_0, r_0, transforms, model, potential_fn, kinetic_grad, step_size, z_grads
         )
-    return z_next, r_next, z_grads, potential_energy
+    return z_next, r_next, z_grads, potential_energy, r_0
 
 
     pass
 
 
-def _single_step_leapfrog_discontiuous(z, r, model, potential_fn, kinetic_grad, step_size, z_grad=None):
+def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, transforms, model, potential_fn, kinetic_grad, step_size, z_grads=None):
     r"""
     Single step leapfrog algorithm that modifies the  `z` and `r` dicts in place by Laplace momentum
     for discontinuous HMC
@@ -119,17 +125,23 @@ def _single_step_leapfrog_discontiuous(z, r, model, potential_fn, kinetic_grad, 
     for site_name in z:
         z[site_name] = z[site_name] + 0.5 * step_size * r[site_name]  # z(n+1)
 
-    z, is_cont, is_cont_vector = run_prog(model, z)
+    z, is_cont, is_cont_vector = run_prog(model, z, transforms)
     # conduct coordinate integration TODO: discontinuous flag
-    # TODO: permutation 
-    z, r = _coord_integrator(z, r, potential_fn, kinetic_grad, step_size, z_grads)
+    # TODO: permutation
+    disc_indices = torch.flatten(torch.nonzero(~is_cont_vector, as_tuple=False))
+    perm = torch.randperm(len(disc_indices))
+    disc_indices_permuted = disc_indices[perm]
+    for j in disc_indices_permuted:
+        if j >= len(z):
+            continue 
+        z, r, is_cont, is_cont_vector, r_0 = _coord_integrator(z, r, z_0, r_0, int(j.item()), model, transforms, potential_fn, kinetic_grad, step_size, z_grads)
 
     # update the variable
     z_grads, potential_energy = potential_grad(potential_fn, z)
     for site_name in z:
         z[site_name] = z[site_name] + 0.5 * step_size * r[site_name]  # r(n+1)
     
-    z, is_cont, is_cont_vector = run_prog(model, z)
+    z, is_cont, is_cont_vector = run_prog(model, z, transforms)
 
     # update momentum
     z_grads, potential_energy = potential_grad(potential_fn, z)
@@ -138,14 +150,45 @@ def _single_step_leapfrog_discontiuous(z, r, model, potential_fn, kinetic_grad, 
             -z_grads[site_name]
         )  # r(n+1/2)
 
-    return z, r, z_grads, potential_energy
+    return z, r, z_grads, potential_energy, r_0
 
 
-def _coord_integrator(z, r, potential_fn, kinetic_grad, step_size, z_grads=None):
+def _coord_integrator(z, r, z_0, r_0, idx, model, transforms, potential_fn, kinetic_grad, step_size, z_grads=None):
     r"""
     Coordinatewise integrator for dynamics with Laplace momentum for discontinuous HMC
     """
-    return z, r
+    U = potential_fn(z)
+    new_z = deepcopy(z)
+    site_name = list(new_z.keys())[idx]
+    new_z[site_name] += step_size * torch.sign(r[site_name])
+    new_z, new_is_cont, new_is_cont_vec = run_prog(model, z, transforms)
+    new_U = potential_fn(new_z)
+    delta_U = new_U - U
+    if not math.isfinite(new_U) or torch.abs(r[site_name]) <= delta_U:
+        r[site_name] = -r[site_name]
+    else:
+        r[site_name] -= torch.sign(r[site_name]) * delta_U
+        N2 = len(new_z)
+        N = len(z)
+        site_name_list = list(new_z.keys())
+        if N2 > N:
+            # extend everything to the higher dimension
+            gauss = torch.distributions.Normal(0, 1).sample([N2-N])
+            laplace = torch.distributions.Laplace(0, 1).sample([N2-N])
+            r_padding = gauss * new_is_cont_vec[N:N2] + laplace * ~new_is_cont_vec
+            for i in range(N, N2):
+                site_name = site_name_list[i]
+                r[site_name] = r_padding[i-N]
+                r_0[site_name] = r_padding[i-N]
+                print(r)
+        else:
+            # truncate everything to the lower dimension
+            for i in range(N2, N):
+                site_name = site_name_list[i]
+                r.pop(site_name)
+                r_0.pop(site_name)
+                print(r)
+    return new_z, r, new_is_cont, new_is_cont_vec, r_0
 
 def velocity_verlet_with_extension(
     z, r, potential_fn, kinetic_grad, num_steps=1, z_grads=None
@@ -210,7 +253,10 @@ def potential_grad(potential_fn, z):
         else:
             raise e
 
-    grads = grad(potential_energy, z_nodes)
+    grads = grad(potential_energy, z_nodes, allow_unused=True)
     for node in z_nodes:
         node.requires_grad_(False)
-    return dict(zip(z_keys, grads)), potential_energy.detach()
+    grad_ret = dict(zip(z_keys, grads))
+    if grad_ret["start"] is None:
+        grad_ret["start"] = torch.tensor(0.0)
+    return grad_ret, potential_energy.detach()

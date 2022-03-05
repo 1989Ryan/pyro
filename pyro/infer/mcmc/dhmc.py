@@ -102,7 +102,7 @@ class DHMC(MCMCKernel):
         adapt_step_size=True,
         adapt_mass_matrix=True,
         full_mass=False,
-        transforms=None,
+        transforms={},
         max_plate_nesting=None,
         jit_compile=False,
         jit_options=None,
@@ -164,6 +164,7 @@ class DHMC(MCMCKernel):
     def _get_is_cont(self, z):
         conditioned_model = pyro.poutine.condition(self.model, data=z)
         trace = pyro.poutine.trace(conditioned_model).get_trace()
+        trace = dict(trace.nodes)
         is_cont = {site_name: trace[site_name]["is_cont"] for site_name in trace \
             if site_name not in ["_INPUT", "_RETURN", "obs"]}
         is_cont_vector = torch.tensor([trace[site_name]["is_cont"] for site_name in trace\
@@ -180,15 +181,16 @@ class DHMC(MCMCKernel):
         # near the target_accept_prob. If accept_prob:=exp(-delta_energy) is small,
         # then we have to decrease step_size; otherwise, increase step_size.
         potential_energy = self.potential_fn(z)
-        r, r_unscaled = self._sample_r(name="r_presample_0", z=z)
+        r_unscaled = self._sample_r(name="r_presample_0", z=z)
         energy_current = self._kinetic_energy(r_unscaled) + potential_energy
         # This is required so as to avoid issues with autograd when model
         # contains transforms with cache_size > 0 (https://github.com/pyro-ppl/pyro/issues/2292)
         z = {k: v.clone() for k, v in z.items()}
         z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
-            z, r, self.potential_fn, self.mass_matrix_adapter.kinetic_grad, step_size
+            z, r_unscaled, self.model, self.transforms, self.potential_fn, self.mass_matrix_adapter.kinetic_grad, step_size
         )
-        r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
+        # r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
+        r_new_unscaled = r_new
         energy_new = self._kinetic_energy(r_new_unscaled) + potential_energy_new
         delta_energy = energy_new - energy_current
         # direction=1 means keep increasing step_size, otherwise decreasing step_size.
@@ -206,11 +208,13 @@ class DHMC(MCMCKernel):
         while direction_new == direction:
             t += 1
             step_size = step_size_scale * step_size
-            r, r_unscaled = self._sample_r(name="r_presample_{}".format(t))
+            r_unscaled = self._sample_r(name="r_presample_{}".format(t))
             energy_current = self._kinetic_energy(r_unscaled) + potential_energy
             z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
                 z,
-                r,
+                r_unscaled,
+                self.model,
+                self.transforms,
                 self.potential_fn,
                 self.mass_matrix_adapter.kinetic_grad,
                 step_size,
@@ -238,12 +242,14 @@ class DHMC(MCMCKernel):
             "{}_{}".format(name, site_names),
             Laplace(
                 torch.zeros(size, **options), torch.ones(size, **options)
-            ),
+            ).sample,
 
         ) * ~is_cont
 
-        r = self.mass_matrix_adapter.scale(r_unscaled, r_prototype=self.initial_params)
-        return r, r_unscaled
+        # r = self.mass_matrix_adapter.scale(r_unscaled, r_prototype=self.initial_params)
+        r_unscaled_site_names, values = r_unscaled.items()
+        r_unscaled = dict(zip(r_unscaled_site_names, tuple(values)))
+        return r_unscaled
 
     @property
     def mass_matrix_adapter(self):
@@ -380,16 +386,16 @@ class DHMC(MCMCKernel):
             if self._t > self._warmup_steps:
                 self._accept_cnt += 1
             return params
-        r, r_unscaled = self._sample_r(name="r_t={}".format(self._t))
-        energy_current = self._kinetic_energy(r_unscaled) + potential_energy
+        r_unscaled = self._sample_r(name="r_t={}".format(self._t), z=z)
 
         # Temporarily disable distributions args checking as
         # NaNs are expected during step size adaptation
         with optional(pyro.validation_enabled(False), self._t < self._warmup_steps):
-            z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
+            z_new, r_new, z_grads_new, potential_energy_new, r_unscaled = leapfrog_discontiouous(
                 z,
                 r_unscaled,
                 self.model,
+                self.transforms,
                 self.potential_fn,
                 self.mass_matrix_adapter.kinetic_grad,
                 self.step_size,
@@ -397,7 +403,9 @@ class DHMC(MCMCKernel):
                 z_grads=z_grads,
             )
             # apply Metropolis correction.
-            r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
+            energy_current = self._kinetic_energy(r_unscaled) + potential_energy
+            r_new_unscaled = r_new 
+            # r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
             energy_proposal = (
                 self._kinetic_energy(r_new_unscaled) + potential_energy_new
             )

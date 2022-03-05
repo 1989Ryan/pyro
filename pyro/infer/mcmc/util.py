@@ -284,6 +284,11 @@ class _PEMaker:
                 t.log_abs_det_jacobian(params_constrained[name], params[name])
             )
         return -log_joint
+    
+    def _potential_fn_without_transform(self, params):
+        conditioned_model = poutine.condition(self.model, data=params)
+        trace = poutine.trace(conditioned_model).get_trace()
+        return -trace.log_prob_sum()
 
     def _potential_fn_jit(self, skip_jit_warnings, jit_options, params):
         if not params:
@@ -319,7 +324,10 @@ class _PEMaker:
         if jit_compile:
             jit_options = {"check_trace": False} if jit_options is None else jit_options
             return partial(self._potential_fn_jit, skip_jit_warnings, jit_options)
-        return self._potential_fn
+        elif self.transforms != {}:
+            return self._potential_fn
+        else:
+            return self._potential_fn_without_transform
 
 
 def _find_valid_initial_params(
@@ -347,9 +355,11 @@ def _find_valid_initial_params(
         if trace is None:
             trace = poutine.trace(model).get_trace(*model_args, **model_kwargs)
         samples = {name: trace.nodes[name]["value"].detach() for name in params}
-        params = {k: transforms[k](v) for k, v in samples.items()}
+        if transforms == {}:
+            params = samples
+        else:
+            params = {k: transforms[k](v) for k, v in samples.items()}
         pe_grad, pe = potential_grad(potential_fn, params)
-
         if torch.isfinite(pe) and all(
             map(torch.all, map(torch.isfinite, pe_grad.values()))
         ):
@@ -478,7 +488,10 @@ def initialize_model(
     )
 
     if initial_params is None:
-        prototype_params = {k: transforms[k](v) for k, v in prototype_samples.items()}
+        if transforms == {}:
+            prototype_params = prototype_samples
+        else:
+            prototype_params = {k: transforms[k](v) for k, v in prototype_samples.items()}
         # Note that we deliberately do not exercise jit compilation here so as to
         # enable potential_fn to be picklable (a torch._C.Function cannot be pickled).
         # We pass model_trace merely for computational savings.
