@@ -212,10 +212,13 @@ def potential_grad(potential_fn, z):
             raise e
 
     grads = grad(potential_energy, z_nodes, allow_unused=True)
-    for node in z_nodes:
-        node.requires_grad_(False)
+    if None in grads:
+        grads = list(grads)
+        grads[grads]
+    if None in grads:
+        grads = list(grads)
+        grads[grads.index(None)] = torch.tensor(0.0)
+        grads = tuple(grads)
     grad_ret = dict(zip(z_keys, grads))
-    if grad_ret["start"] is None:
-        grad_ret["start"] = torch.tensor(0.0)
     assert len(grad_ret) == len(z)
     return grad_ret, potential_energy.detach()
