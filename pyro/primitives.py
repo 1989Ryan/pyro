@@ -125,6 +125,10 @@ def sample(name, fn, *args, **kwargs):
     # Transform obs_mask into multiple sample statements.
     obs = kwargs.pop("obs", None)
     obs_mask = kwargs.pop("obs_mask", None)
+<<<<<<< Updated upstream
+=======
+    is_cont = kwargs.pop("is_cont", True)
+>>>>>>> Stashed changes
     if obs_mask is not None:
         return _masked_observe(name, fn, obs, obs_mask, *args, **kwargs)
 

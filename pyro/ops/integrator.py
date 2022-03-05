@@ -172,4 +172,14 @@ def potential_grad(potential_fn, z):
     grads = grad(potential_energy, z_nodes)
     for node in z_nodes:
         node.requires_grad_(False)
+<<<<<<< Updated upstream
     return dict(zip(z_keys, grads)), potential_energy.detach()
+=======
+    if None in grads:
+        grads = list(grads)
+        grads[grads.index(None)] = torch.tensor(0.0)
+        grads = tuple(grads)
+    grad_ret = dict(zip(z_keys, grads))
+    assert len(grad_ret) == len(z)
+    return grad_ret, potential_energy.detach()
+>>>>>>> Stashed changes
