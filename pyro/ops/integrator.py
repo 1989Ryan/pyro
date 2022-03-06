@@ -7,6 +7,8 @@ from cProfile import run
 from torch.autograd import grad
 import pyro.poutine as poutine
 import torch
+import time
+# from tqdm import tqdm
 
 def run_prog(
     model,
@@ -69,7 +71,6 @@ def _single_step_verlet(z, r, potential_fn, kinetic_grad, step_size, z_grads=Non
     r"""
     Single step velocity verlet that modifies the `z`, `r` dicts in place.
     """
-
     z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
     # print(r)
     # print(z)
@@ -94,15 +95,20 @@ def leapfrog_discontiouous(
     r"""
     Leapfrog algorithm for discontinuous HMC
     """
+    # assert len(z) == len(r)
     z_next = z.copy()
     r_next = r.copy()
     z_0 = z.copy()
     r_0 = r.copy()
     for _ in range(num_steps):
-        z_next, r_next, z_grads, potential_energy, r_0 = _single_step_leapfrog_discontiuous(
+        # print("running leapfrog")
+        # start = time.time()
+        z_next, r_next, z_grads, potential_energy, r_0, is_cont, _ = _single_step_leapfrog_discontiuous(
             z_next, r_next, z_0, r_0, is_cont, transforms, model, potential_fn, kinetic_grad, step_size, z_grads
         )
-    return z_next, r_next, z_grads, potential_energy, r_0
+        # end = time.time()
+        # print("single step: {}".format(end-start))
+    return z_next, r_next, z_grads, potential_energy, r_0, is_cont
 
 
 def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, model, potential_fn, kinetic_grad, step_size, z_grads=None):
@@ -110,7 +116,9 @@ def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, mode
     Single step leapfrog algorithm that modifies the  `z` and `r` dicts in place by Laplace momentum
     for discontinuous HMC
     """
-    # update the momentum 
+    # update the momentum
+    # assert len(z) == len(r)
+    first_start = time.time() 
     z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
     for site_name in z_grads:
         r[site_name] = r[site_name] + 0.5 * step_size * (
@@ -118,73 +126,101 @@ def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, mode
         ) * is_cont[site_name]  # r(n+1/2)
 
     # update the variable
-    r_grads = kinetic_grad(r)
     for site_name in z:
         z[site_name] = z[site_name] + 0.5 * step_size * r[site_name] * is_cont[site_name]  # z(n+1)
 
     z, is_cont, is_cont_vector = run_prog(model, z, transforms)
     # conduct coordinate integration TODO: discontinuous flag
     # TODO: permutation
-    disc_indices = torch.flatten(torch.nonzero(~is_cont_vector, as_tuple=False))
+    # assert len(z) == len(r)
+    disc_indices = torch.flatten(torch.nonzero(~is_cont_vector.clone(), as_tuple=False))
     perm = torch.randperm(len(disc_indices))
     disc_indices_permuted = disc_indices[perm]
+    # assert len(z) == len(r)
+    # print("finish the first part of leapfrog")
+    # coord_start = time.time()
     for j in disc_indices_permuted:
         if j >= len(z):
-            continue 
+            continue
         z, r, is_cont, is_cont_vector, r_0 = _coord_integrator(z, r, z_0, r_0, int(j.item()), model, transforms, potential_fn, kinetic_grad, step_size, z_grads)
-
+    # second_start = time.time()
+    # print("coord integrator time: {}".format(end-start))
+    # print("finish discontinuous part")
     # update the variable
+    
     z_grads, potential_energy = potential_grad(potential_fn, z)
+    # t1 = time.time()
     for site_name in z:
         z[site_name] = z[site_name] + 0.5 * step_size * r[site_name] * is_cont[site_name]  # r(n+1)
-    
+        # if math.isnan(z[site_name].item()):
+            # print(is_cont[site_name])
+            # print(r)
     z, is_cont, is_cont_vector = run_prog(model, z, transforms)
-
     # update momentum
+    # t2 = time.time()
     z_grads, potential_energy = potential_grad(potential_fn, z)
+    # t3 = time.time()
     for site_name in z_grads:
         r[site_name] = r[site_name] + 0.5 * step_size * (
             -z_grads[site_name]
         ) * is_cont[site_name]  # r(n+1/2)
-
-    return z, r, z_grads, potential_energy, r_0
+    # print("finish leap frog")
+    # finish = time.time()
+    # print(t1-second_start, t3-t2)
+    # if finish - first_start > 0.1:
+    #     print("first step: {}".format(-first_start + coord_start))
+    #     print("coord step: {}".format(-coord_start + second_start))
+    #     print("secon step: {}".format(-second_start+finish))
+    # assert len(z) == len(r)
+    return z, r, z_grads, potential_energy, r_0, is_cont, is_cont_vector
 
 
 def _coord_integrator(z, r, z_0, r_0, idx, model, transforms, potential_fn, kinetic_grad, step_size, z_grads=None):
     r"""
     Coordinatewise integrator for dynamics with Laplace momentum for discontinuous HMC
     """
+    # print("z: {}, r: {}".format(len(z), len(r)))
+    assert len(z) == len(r)
     U = potential_fn(z)
-    new_z = deepcopy(z)
+    new_z = z.copy()
     site_name = list(new_z.keys())[idx]
     new_z[site_name] += step_size * torch.sign(r[site_name])
-    new_z, new_is_cont, new_is_cont_vec = run_prog(model, z, transforms)
+    new_z, new_is_cont, new_is_cont_vec = run_prog(model, new_z, transforms)
     new_U = potential_fn(new_z)
     delta_U = new_U - U
-    if not math.isfinite(new_U) or torch.abs(r[site_name]) <= delta_U:
+    # TODO: energy function
+    if not torch.isfinite(new_U) or torch.abs(r[site_name]) <= delta_U or not torch.isfinite(delta_U):
         r[site_name] = -r[site_name]
     else:
         r[site_name] -= torch.sign(r[site_name]) * delta_U
-        N2 = len(new_z)
-        N = len(z)
-        site_name_list = list(new_z.keys())
-        if N2 > N:
-            # extend everything to the higher dimension
-            gauss = torch.distributions.Normal(0, 1).sample([N2-N])
-            laplace = torch.distributions.Laplace(0, 1).sample([N2-N])
-            r_padding = gauss * new_is_cont_vec[N:N2] + laplace * ~new_is_cont_vec
-            for i in range(N, N2):
-                site_name = site_name_list[i]
-                r[site_name] = r_padding[i-N]
-                r_0[site_name] = r_padding[i-N]
-        else:
-            # truncate everything to the lower dimension
-            for i in range(N2, N):
-                site_name = site_name_list[i]
-                r.pop(site_name)
-                r_0.pop(site_name)
-        assert len(new_z) == len(r)
-        assert len(r_0) == len(r)
+    N2 = len(new_z)
+    N = len(z)
+    site_name_list = list(new_z.keys())
+    if N2 > N:
+
+        # start = time.time()
+        # extend everything to the higher dimension
+        gauss = torch.distributions.Normal(0, 1).sample([N2-N])
+        laplace = torch.distributions.Laplace(0, 1).sample([N2-N])
+        r_padding = gauss * new_is_cont_vec[N:N2] + laplace * ~new_is_cont_vec[N:N2]
+        for i in range(N, N2):
+            site_name = site_name_list[i]
+            r[site_name] = r_padding[i-N]
+            r_0[site_name] = r_padding[i-N]
+        # end = time.time()
+        # print("extension time: {}".format(end-start))
+    else:
+        # start = time.time()
+        site_name_list = list(z.keys())
+        # truncate everything to the lower dimension
+        for i in range(N2, N):
+            site_name = site_name_list[i]
+            r.pop(site_name)
+            r_0.pop(site_name)
+        # end = time.time()
+        # print("truncation time: {}".format(end-start))
+    assert len(new_z) == len(r)
+    assert len(r_0) == len(r)
     return new_z, r, new_is_cont, new_is_cont_vec, r_0
 
 def potential_grad(potential_fn, z):
@@ -199,8 +235,11 @@ def potential_grad(potential_fn, z):
         torch scalar.
     """
     z_keys, z_nodes = zip(*z.items())
+    # index = 0
     for node in z_nodes:
         node.requires_grad_(True)
+        # print(z_keys[index], z[z_keys[index]])
+        # index += 1
     try:
         potential_energy = potential_fn(z)
     # deal with singular matrices
@@ -210,15 +249,15 @@ def potential_grad(potential_fn, z):
             return grads, z_nodes[0].new_tensor(float("nan"))
         else:
             raise e
-
-    grads = grad(potential_energy, z_nodes, allow_unused=True)
-    if None in grads:
-        grads = list(grads)
-        grads[grads]
-    if None in grads:
-        grads = list(grads)
-        grads[grads.index(None)] = torch.tensor(0.0)
-        grads = tuple(grads)
+    # print(z_nodes)
+    if torch.isfinite(potential_energy):
+        grads = grad(potential_energy, z_nodes, allow_unused=True)
+        if None in grads:
+            grads = list(grads)
+            grads[grads.index(None)] = torch.tensor(0.0)
+            grads = tuple(grads)
+    else:
+        grads = torch.zeros(len(z_nodes))
     grad_ret = dict(zip(z_keys, grads))
     assert len(grad_ret) == len(z)
     return grad_ret, potential_energy.detach()

@@ -162,7 +162,7 @@ def _gen_samples(kernel, warmup_steps, num_samples, hook, chain_id, *args, **kwa
             "Sample [{}]".format(chain_id) if chain_id is not None else "Sample",
             i,
         )
-        flat = [params[name].reshape(-1) for name in save_params]
+        flat = [params[name].reshape(-1) for name in params]
         yield (torch.cat if flat else torch.tensor)(flat)
     yield kernel.diagnostics()
     kernel.cleanup()

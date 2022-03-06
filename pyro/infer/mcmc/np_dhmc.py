@@ -143,11 +143,11 @@ class NPDHMC(MCMCKernel):
         )
         super().__init__()
 
-    def _kinetic_energy(self, r_unscaled):
+    def _kinetic_energy(self, r_unscaled, is_cont):
         energy = 0.0
         for site_names, value in r_unscaled.items():
-            energy = energy + value*value
-        return 0.5 * energy
+            energy = energy + 0.5 * value*value * is_cont[site_names] + torch.abs(value)* ~is_cont[site_names]
+        return energy
 
     def _reset(self):
         self._t = 0
@@ -182,16 +182,18 @@ class NPDHMC(MCMCKernel):
         # then we have to decrease step_size; otherwise, increase step_size.
         potential_energy = self.potential_fn(z)
         r_unscaled, is_cont, _ = self._sample_r(name="r_presample_0", z=z)
-        energy_current = self._kinetic_energy(r_unscaled) + potential_energy
+        # energy_current = self._kinetic_energy(r_unscaled) + potential_energy
         # This is required so as to avoid issues with autograd when model
         # contains transforms with cache_size > 0 (https://github.com/pyro-ppl/pyro/issues/2292)
         z = {k: v.clone() for k, v in z.items()}
-        z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
+        z_new, r_new, z_grads_new, potential_energy_new, r_unscaled, is_cont_new= leapfrog_discontiouous(
             z, r_unscaled, is_cont, self.model, self.transforms, self.potential_fn, self.mass_matrix_adapter.kinetic_grad, step_size
         )
+        energy_current = self._kinetic_energy(r_unscaled, is_cont) + potential_energy
+
         # r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
         r_new_unscaled = r_new
-        energy_new = self._kinetic_energy(r_new_unscaled) + potential_energy_new
+        energy_new = self._kinetic_energy(r_new_unscaled, is_cont_new) + potential_energy_new
         delta_energy = energy_new - energy_current
         # direction=1 means keep increasing step_size, otherwise decreasing step_size.
         # Note that the direction is -1 if delta_energy is `NaN` which may be the
@@ -209,8 +211,8 @@ class NPDHMC(MCMCKernel):
             t += 1
             step_size = step_size_scale * step_size
             r_unscaled, is_cont, _ = self._sample_r(name="r_presample_{}".format(t))
-            energy_current = self._kinetic_energy(r_unscaled) + potential_energy
-            z_new, r_new, z_grads_new, potential_energy_new = leapfrog_discontiouous(
+            # energy_current = self._kinetic_energy(r_unscaled) + potential_energy
+            z_new, r_new, z_grads_new, potential_energy_new, r_unscaled, is_cont_new = leapfrog_discontiouous(
                 z,
                 r_unscaled,
                 is_cont, 
@@ -220,8 +222,9 @@ class NPDHMC(MCMCKernel):
                 self.mass_matrix_adapter.kinetic_grad,
                 step_size,
             )
-            r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
-            energy_new = self._kinetic_energy(r_new_unscaled) + potential_energy_new
+            energy_current = self._kinetic_energy(r_unscaled, is_cont) + potential_energy
+            r_new_unscaled = r_new
+            energy_new = self._kinetic_energy(r_new_unscaled, is_cont_new) + potential_energy_new
             delta_energy = energy_new - energy_current
             direction_new = 1 if self._direction_threshold < -delta_energy else -1
         return step_size
@@ -392,7 +395,7 @@ class NPDHMC(MCMCKernel):
         # Temporarily disable distributions args checking as
         # NaNs are expected during step size adaptation
         with optional(pyro.validation_enabled(False), self._t < self._warmup_steps):
-            z_new, r_new, z_grads_new, potential_energy_new, r_unscaled = leapfrog_discontiouous(
+            z_new, r_new, z_grads_new, potential_energy_new, r_unscaled, is_cont_new = leapfrog_discontiouous(
                 z,
                 r_unscaled,
                 is_cont,
@@ -405,11 +408,11 @@ class NPDHMC(MCMCKernel):
                 z_grads=z_grads,
             )
             # apply Metropolis correction.
-            energy_current = self._kinetic_energy(r_unscaled) + potential_energy
+            energy_current = self._kinetic_energy(r_unscaled, is_cont_new) + potential_energy
             r_new_unscaled = r_new 
             # r_new_unscaled = self.mass_matrix_adapter.unscale(r_new)
             energy_proposal = (
-                self._kinetic_energy(r_new_unscaled) + potential_energy_new
+                self._kinetic_energy(r_new_unscaled, is_cont_new) + potential_energy_new
             )
         delta_energy = energy_proposal - energy_current
         # handle the NaN case which may be the case for a diverging trajectory
@@ -421,8 +424,8 @@ class NPDHMC(MCMCKernel):
         )
         if delta_energy > self._max_sliced_energy and self._t >= self._warmup_steps:
             self._divergences.append(self._t - self._warmup_steps)
-
         accept_prob = (-delta_energy).exp().clamp(max=1.0)
+
         rand = pyro.sample(
             "rand_t={}".format(self._t),
             dist.Uniform(scalar_like(accept_prob, 0.0), scalar_like(accept_prob, 1.0)),
@@ -441,7 +444,7 @@ class NPDHMC(MCMCKernel):
                 self._accept_cnt += 1
         else:
             n = self._t
-            self._adapter.step(self._t, z, accept_prob, z_grads)
+            # self._adapter.step(self._t, z, accept_prob, z_grads)
 
         self._mean_accept_prob += (accept_prob.item() - self._mean_accept_prob) / n
         return z.copy()
