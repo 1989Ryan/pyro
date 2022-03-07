@@ -172,6 +172,7 @@ def _gen_samples(kernel, warmup_steps, num_samples, hook, chain_id, *args, **kwa
         yield (torch.cat if flat else torch.tensor)(flat)
     yield kernel.diagnostics()
     yield z_structure
+    yield ordered_list
     kernel.cleanup()
 
 
@@ -572,7 +573,10 @@ class MCMC(AbstractMCMC):
                     num_samples[chain_id] += 1
                     self._diagnostics[chain_id] = x
                 elif num_samples[chain_id] == self.num_samples + 1:
+                    num_samples[chain_id] += 1
                     z_structure = x
+                elif num_samples[chain_id] == self.num_samples + 2:
+                    z_site_list = x
                 else:
                     num_samples[chain_id] += 1
                     if self.num_chains > 1:
@@ -592,7 +596,7 @@ class MCMC(AbstractMCMC):
         # unpack latent
         pos = 0
         z_acc = z_structure.copy()
-        for k in sorted(z_structure):
+        for k in z_site_list:
             shape = z_structure[k]
             next_pos = pos + shape.numel()
             z_acc[k] = z_flat_acc[:, :, pos:next_pos].reshape(
