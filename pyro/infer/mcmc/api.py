@@ -145,7 +145,9 @@ def _gen_samples(kernel, warmup_steps, num_samples, hook, chain_id, *args, **kwa
     params = kernel.initial_params
     save_params = getattr(kernel, "save_params", sorted(params))
     # yield structure (key, value.shape) of params
-    yield {name: params[name].shape for name in save_params}
+    z_structure =  {name: params[name].shape for name in save_params}
+    ordered_list = list(z_structure.keys())
+    # print(z_structure)
     for i in range(warmup_steps):
         params = kernel.sample(params)
         hook(
@@ -162,9 +164,14 @@ def _gen_samples(kernel, warmup_steps, num_samples, hook, chain_id, *args, **kwa
             "Sample [{}]".format(chain_id) if chain_id is not None else "Sample",
             i,
         )
-        flat = [params[name].reshape(-1) for name in params]
+        if len(params) > len(z_structure):
+            z_structure =  {name: params[name].shape for name in params}
+            ordered_list += [name for name in z_structure if name not in ordered_list]
+        # print(params)
+        flat = [params[name].reshape(-1) if name in params else torch.tensor([-torch.inf]) for name in ordered_list]
         yield (torch.cat if flat else torch.tensor)(flat)
     yield kernel.diagnostics()
+    yield z_structure
     kernel.cleanup()
 
 
@@ -561,11 +568,11 @@ class MCMC(AbstractMCMC):
             # requires_grad", which happens with `jit_compile` under PyTorch 1.7
             args = [arg.detach() if torch.is_tensor(arg) else arg for arg in args]
             for x, chain_id in self.sampler.run(*args, **kwargs):
-                if num_samples[chain_id] == 0:
+                if num_samples[chain_id] == self.num_samples:
                     num_samples[chain_id] += 1
-                    z_structure = x
-                elif num_samples[chain_id] == self.num_samples + 1:
                     self._diagnostics[chain_id] = x
+                elif num_samples[chain_id] == self.num_samples + 1:
+                    z_structure = x
                 else:
                     num_samples[chain_id] += 1
                     if self.num_chains > 1:
@@ -574,8 +581,13 @@ class MCMC(AbstractMCMC):
                     else:
                         x_cloned = x
                     z_flat_acc[chain_id].append(x_cloned)
-
-        z_flat_acc = torch.stack([torch.stack(l) for l in z_flat_acc])
+        z_flat = []
+        for ele in z_flat_acc:
+            lst = []
+            for ele_l in ele:
+                lst.append(torch.cat((ele_l, torch.tensor([-torch.inf for _ in range(len(z_structure)-len(ele_l))])))) 
+            z_flat.append(lst)
+        z_flat_acc = torch.stack([torch.stack(l) for l in z_flat])
 
         # unpack latent
         pos = 0
@@ -595,9 +607,13 @@ class MCMC(AbstractMCMC):
             self._set_transforms(*args, **kwargs)
 
         # transform samples back to constrained space
-        for name, z in z_acc.items():
-            if name in self.transforms:
-                z_acc[name] = self.transforms[name].inv(z)
+        if self.transforms == {}:
+            for name, z in z_acc.items():
+                z_acc[name] = z_acc[name][z_acc[name] != -torch.inf]
+        else:
+            for name, z in z_acc.items():
+                if name in self.transforms:
+                    z_acc[name] = self.transforms[name].inv(z)
         self._samples = z_acc
 
         # terminate the sampler (shut down worker processes)
