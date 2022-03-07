@@ -196,25 +196,26 @@ def _coord_integrator(z, r, z_0, r_0, idx, model, transforms, potential_fn, kine
     N2 = len(new_z)
     N = len(z)
     site_name_list = list(new_z.keys())
+    old_site_name_list = list(z.keys())
     if N2 > N:
-
+        unused_site_name_list = [ele for ele in site_name_list if ele not in old_site_name_list]
         # start = time.time()
         # extend everything to the higher dimension
         gauss = torch.distributions.Normal(0, 1).sample([N2-N])
         laplace = torch.distributions.Laplace(0, 1).sample([N2-N])
         r_padding = gauss * new_is_cont_vec[N:N2] + laplace * ~new_is_cont_vec[N:N2]
-        for i in range(N, N2):
-            site_name = site_name_list[i]
-            r[site_name] = r_padding[i-N]
-            r_0[site_name] = r_padding[i-N]
+        for i in range(N2-N):
+            site_name = unused_site_name_list[i]
+            r[site_name] = r_padding[i]
+            r_0[site_name] = r_padding[i]
         # end = time.time()
         # print("extension time: {}".format(end-start))
     else:
         # start = time.time()
-        site_name_list = list(z.keys())
+        unused_site_name_list = [ele for ele in old_site_name_list if ele not in site_name_list]
         # truncate everything to the lower dimension
-        for i in range(N2, N):
-            site_name = site_name_list[i]
+        for i in range(N-N2):
+            site_name = unused_site_name_list[i]
             r.pop(site_name)
             r_0.pop(site_name)
         # end = time.time()
