@@ -122,7 +122,7 @@ def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, mode
     z_grads = potential_grad(potential_fn, z)[0] if z_grads is None else z_grads
     for site_name in z_grads:
         r[site_name] = r[site_name] + 0.5 * step_size * (
-            -z_grads[site_name]
+                -z_grads[site_name]
         ) * is_cont[site_name]  # r(n+1/2)
 
     # update the variable
@@ -130,9 +130,8 @@ def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, mode
         z[site_name] = z[site_name] + 0.5 * step_size * r[site_name] * is_cont[site_name]  # z(n+1)
 
     z, is_cont, is_cont_vector = run_prog(model, z, transforms)
-    # conduct coordinate integration TODO: discontinuous flag
-    # TODO: permutation
-    # assert len(z) == len(r)
+    # print(z)
+    assert len(z) == len(r)
     disc_indices = torch.flatten(torch.nonzero(~is_cont_vector.clone(), as_tuple=False))
     perm = torch.randperm(len(disc_indices))
     disc_indices_permuted = disc_indices[perm]
@@ -142,7 +141,9 @@ def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, mode
     for j in disc_indices_permuted:
         if j >= len(z):
             continue
-        z, r, is_cont, is_cont_vector, r_0 = _coord_integrator(z, r, z_0, r_0, int(j.item()), model, transforms, potential_fn, kinetic_grad, step_size, z_grads)
+        z, r, is_cont, is_cont_vector, r_0 = _coord_integrator(z, r, z_0, r_0, is_cont, is_cont_vector, 
+                                                                int(j.item()), model, transforms, potential_fn, 
+                                                                kinetic_grad, step_size, z_grads)
     # second_start = time.time()
     # print("coord integrator time: {}".format(end-start))
     # print("finish discontinuous part")
@@ -150,15 +151,22 @@ def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, mode
     
     z_grads, potential_energy = potential_grad(potential_fn, z)
     # t1 = time.time()
+    z_ = z.copy()
     for site_name in z:
+        pre_z = z[site_name].clone()
         z[site_name] = z[site_name] + 0.5 * step_size * r[site_name] * is_cont[site_name]  # r(n+1)
+        if pre_z != z[site_name]:
+            print(is_cont[site_name])
         # if math.isnan(z[site_name].item()):
             # print(is_cont[site_name])
             # print(r)
+    assert z_ == z
     z, is_cont, is_cont_vector = run_prog(model, z, transforms)
+    assert len(z) == len(r)
     # update momentum
     # t2 = time.time()
-    z_grads, potential_energy = potential_grad(potential_fn, z)
+    if z_ != z:
+        z_grads, potential_energy = potential_grad(potential_fn, z)
     # t3 = time.time()
     for site_name in z_grads:
         r[site_name] = r[site_name] + 0.5 * step_size * (
@@ -171,58 +179,67 @@ def _single_step_leapfrog_discontiuous(z, r, z_0, r_0, is_cont, transforms, mode
     #     print("first step: {}".format(-first_start + coord_start))
     #     print("coord step: {}".format(-coord_start + second_start))
     #     print("secon step: {}".format(-second_start+finish))
-    # assert len(z) == len(r)
     return z, r, z_grads, potential_energy, r_0, is_cont, is_cont_vector
 
 
-def _coord_integrator(z, r, z_0, r_0, idx, model, transforms, potential_fn, kinetic_grad, step_size, z_grads=None):
+def _coord_integrator(z, r, z_0, r_0, is_cont, is_cont_vec, idx, model, transforms, potential_fn, kinetic_grad, step_size, z_grads=None):
     r"""
     Coordinatewise integrator for dynamics with Laplace momentum for discontinuous HMC
     """
     # print("z: {}, r: {}".format(len(z), len(r)))
+    # print("running")
+    # print(z)
+    # z, _, _ = run_prog(model, z, transforms)
+    # print(z)
     assert len(z) == len(r)
     U = potential_fn(z)
     new_z = z.copy()
     site_name = list(new_z.keys())[idx]
-    new_z[site_name] += step_size * torch.sign(r[site_name])
+
+    new_z[site_name] = new_z[site_name].clone().detach() + step_size * torch.sign(r[site_name])
     new_z, new_is_cont, new_is_cont_vec = run_prog(model, new_z, transforms)
     new_U = potential_fn(new_z)
     delta_U = new_U - U
-    # TODO: energy function
-    if not torch.isfinite(new_U) or torch.abs(r[site_name]) <= delta_U or not torch.isfinite(delta_U):
+    if not torch.isfinite(new_U) or torch.abs(r[site_name]) <= delta_U:
+        # print("changing dir")
         r[site_name] = -r[site_name]
     else:
-        r[site_name] -= torch.sign(r[site_name]) * delta_U
-    N2 = len(new_z)
-    N = len(z)
-    site_name_list = list(new_z.keys())
-    old_site_name_list = list(z.keys())
-    if N2 > N:
-        unused_site_name_list = [ele for ele in site_name_list if ele not in old_site_name_list]
-        # start = time.time()
-        # extend everything to the higher dimension
-        gauss = torch.distributions.Normal(0, 1).sample([N2-N])
-        laplace = torch.distributions.Laplace(0, 1).sample([N2-N])
-        r_padding = gauss * new_is_cont_vec[N:N2] + laplace * ~new_is_cont_vec[N:N2]
-        for i in range(N2-N):
-            site_name = unused_site_name_list[i]
-            r[site_name] = r_padding[i]
-            r_0[site_name] = r_padding[i]
-        # end = time.time()
-        # print("extension time: {}".format(end-start))
-    else:
-        # start = time.time()
-        unused_site_name_list = [ele for ele in old_site_name_list if ele not in site_name_list]
-        # truncate everything to the lower dimension
-        for i in range(N-N2):
-            site_name = unused_site_name_list[i]
-            r.pop(site_name)
-            r_0.pop(site_name)
-        # end = time.time()
-        # print("truncation time: {}".format(end-start))
-    assert len(new_z) == len(r)
+        # print("changing dim")
+        r[site_name] = r[site_name].clone().detach() - torch.sign(r[site_name].clone().detach()) * delta_U
+        N2 = len(new_z)
+        N = len(z)
+        site_name_list = list(new_z.keys())
+        old_site_name_list = list(z.keys())
+        z = new_z.copy()
+        is_cont = new_is_cont.copy()
+        is_cont_vec = new_is_cont_vec.clone()
+        if N2 > N:
+            unused_site_name_list = [ele for ele in site_name_list if ele not in old_site_name_list]
+            # start = time.time()
+            # extend everything to the higher dimension
+            gauss = torch.distributions.Normal(0, 1).sample([N2-N])
+            laplace = torch.distributions.Laplace(0, 1).sample([N2-N])
+            r_padding = gauss * new_is_cont_vec[N:N2] + laplace * ~new_is_cont_vec[N:N2]
+            for i in range(N2-N):
+                site_name = unused_site_name_list[i]
+                r[site_name] = r_padding[i]
+                r_0[site_name] = r_padding[i]
+            # end = time.time()
+            # print("extension time: {}".format(end-start))
+        else:
+            # start = time.time()
+            unused_site_name_list = [ele for ele in old_site_name_list if ele not in site_name_list]
+            # truncate everything to the lower dimension
+            for i in range(N-N2):
+                site_name = unused_site_name_list[i]
+                r.pop(site_name)
+                r_0.pop(site_name)
+            # end = time.time()
+            # print("truncation time: {}".format(end-start))
+    assert len(z) == len(r)
     assert len(r_0) == len(r)
-    return new_z, r, new_is_cont, new_is_cont_vec, r_0
+    assert len(is_cont) == len(r)
+    return z, r, is_cont, is_cont_vec, r_0
 
 def potential_grad(potential_fn, z):
     """
